@@ -12,8 +12,6 @@ import pandas as pd
 import graphrag.api as api
 from graphrag.config.load_config import load_config
 from graphrag.config.models.graph_rag_config import GraphRagConfig
-from graphrag.config.resolve_path import resolve_paths
-from graphrag.index.create_pipeline_config import create_pipeline_config
 from graphrag.logger.print_progress import PrintProgressLogger
 from graphrag.storage.factory import StorageFactory
 from graphrag.utils.storage import load_table_from_storage, storage_has_table
@@ -36,9 +34,10 @@ def run_global_search(
     Loads index files required for global search and calls the Query API.
     """
     root = root_dir.resolve()
-    config = load_config(root, config_filepath)
-    config.storage.base_dir = str(data_dir) if data_dir else config.storage.base_dir
-    resolve_paths(config)
+    cli_overrides = {}
+    if data_dir:
+        cli_overrides["output.base_dir"] = str(data_dir)
+    config = load_config(root, config_filepath, cli_overrides)
 
     dataframe_dict = _resolve_output_files(
         config=config,
@@ -120,9 +119,10 @@ def run_local_search(
     Loads index files required for local search and calls the Query API.
     """
     root = root_dir.resolve()
-    config = load_config(root, config_filepath)
-    config.storage.base_dir = str(data_dir) if data_dir else config.storage.base_dir
-    resolve_paths(config)
+    cli_overrides = {}
+    if data_dir:
+        cli_overrides["output.base_dir"] = str(data_dir)
+    config = load_config(root, config_filepath, cli_overrides)
 
     dataframe_dict = _resolve_output_files(
         config=config,
@@ -202,6 +202,7 @@ def run_drift_search(
     data_dir: Path | None,
     root_dir: Path,
     community_level: int,
+    response_type: str,
     streaming: bool,
     query: str,
 ):
@@ -210,9 +211,10 @@ def run_drift_search(
     Loads index files required for local search and calls the Query API.
     """
     root = root_dir.resolve()
-    config = load_config(root, config_filepath)
-    config.storage.base_dir = str(data_dir) if data_dir else config.storage.base_dir
-    resolve_paths(config)
+    cli_overrides = {}
+    if data_dir:
+        cli_overrides["output.base_dir"] = str(data_dir)
+    config = load_config(root, config_filepath, cli_overrides)
 
     dataframe_dict = _resolve_output_files(
         config=config,
@@ -234,8 +236,33 @@ def run_drift_search(
 
     # call the Query API
     if streaming:
-        error_msg = "Streaming is not supported yet for DRIFT search."
-        raise NotImplementedError(error_msg)
+
+        async def run_streaming_search():
+            full_response = ""
+            context_data = None
+            get_context_data = True
+            async for stream_chunk in api.drift_search_streaming(
+                config=config,
+                nodes=final_nodes,
+                entities=final_entities,
+                community_reports=final_community_reports,
+                text_units=final_text_units,
+                relationships=final_relationships,
+                community_level=community_level,
+                response_type=response_type,
+                query=query,
+            ):
+                if get_context_data:
+                    context_data = stream_chunk
+                    get_context_data = False
+                else:
+                    full_response += stream_chunk
+                    print(stream_chunk, end="")  # noqa: T201
+                    sys.stdout.flush()  # flush output buffer to display text immediately
+            print()  # noqa: T201
+            return full_response, context_data
+
+        return asyncio.run(run_streaming_search())
 
     # not streaming
     response, context_data = asyncio.run(
@@ -247,6 +274,7 @@ def run_drift_search(
             text_units=final_text_units,
             relationships=final_relationships,
             community_level=community_level,
+            response_type=response_type,
             query=query,
         )
     )
@@ -269,9 +297,10 @@ def run_basic_search(
     Loads index files required for basic search and calls the Query API.
     """
     root = root_dir.resolve()
-    config = load_config(root, config_filepath)
-    config.storage.base_dir = str(data_dir) if data_dir else config.storage.base_dir
-    resolve_paths(config)
+    cli_overrides = {}
+    if data_dir:
+        cli_overrides["output.base_dir"] = str(data_dir)
+    config = load_config(root, config_filepath, cli_overrides)
 
     dataframe_dict = _resolve_output_files(
         config=config,
@@ -280,8 +309,6 @@ def run_basic_search(
         ],
     )
     final_text_units: pd.DataFrame = dataframe_dict["create_final_text_units"]
-
-    print(streaming)  # noqa: T201
 
     # # call the Query API
     if streaming:
@@ -327,10 +354,9 @@ def _resolve_output_files(
 ) -> dict[str, pd.DataFrame]:
     """Read indexing output files to a dataframe dict."""
     dataframe_dict = {}
-    pipeline_config = create_pipeline_config(config)
-    storage_config = pipeline_config.storage.model_dump()  # type: ignore
+    output_config = config.output.model_dump()  # type: ignore
     storage_obj = StorageFactory().create_storage(
-        storage_type=storage_config["type"], kwargs=storage_config
+        storage_type=output_config["type"], kwargs=output_config
     )
     for name in output_list:
         df_value = asyncio.run(load_table_from_storage(name=name, storage=storage_obj))
